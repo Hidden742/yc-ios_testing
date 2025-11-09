@@ -1,0 +1,130 @@
+name: iOS Build and Deploy
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+
+jobs:
+  build-ios:
+    runs-on: macos-latest
+    
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v3
+      
+    - name: Setup Flutter
+      uses: subosito/flutter-action@v2
+      with:
+        flutter-version: '3.16.x'
+        channel: 'stable'
+        
+    - name: Cache Flutter dependencies
+      uses: actions/cache@v3
+      with:
+        path: |
+          ~/.pub-cache
+          **/.packages
+          **/.flutter-plugins
+          **/.flutter-plugin-dependencies
+          **/.dart_tool/package_config.json
+        key: flutter-${{ runner.os }}-${{ hashFiles('**/pubspec.yaml') }}
+        restore-keys: flutter-${{ runner.os }}-
+        
+    - name: Install Flutter dependencies
+      run: flutter pub get
+      
+    - name: Run Flutter analyzer
+      run: flutter analyze
+      
+    - name: Run unit tests
+      run: flutter test
+      
+    - name: Setup iOS signing
+      env:
+        IOS_CERTIFICATE_BASE64: ${{ secrets.IOS_CERTIFICATE_BASE64 }}
+        IOS_PROVISIONING_PROFILE_BASE64: ${{ secrets.IOS_PROVISIONING_PROFILE_BASE64 }}
+        IOS_CERTIFICATE_PASSWORD: ${{ secrets.IOS_CERTIFICATE_PASSWORD }}
+        KEYCHAIN_PASSWORD: ${{ secrets.KEYCHAIN_PASSWORD }}
+      run: |
+        # Create keychain
+        security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+        security default-keychain -s build.keychain
+        security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
+        
+        # Import certificate
+        echo $IOS_CERTIFICATE_BASE64 | base64 --decode > certificate.p12
+        security import certificate.p12 -k build.keychain -P "$IOS_CERTIFICATE_PASSWORD" -T /usr/bin/codesign
+        security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "$KEYCHAIN_PASSWORD" build.keychain
+        
+        # Install provisioning profile
+        mkdir -p ~/Library/MobileDevice/Provisioning\ Profiles
+        echo $IOS_PROVISIONING_PROFILE_BASE64 | base64 --decode > ~/Library/MobileDevice/Provisioning\ Profiles/build_pp.mobileprovision
+        
+    - name: Build iOS (Debug)
+      run: |
+        flutter build ios --debug --no-codesign
+        
+    - name: Build iOS (Release)
+      if: github.ref == 'refs/heads/main'
+      run: |
+        flutter build ios --release --no-codesign
+        
+    - name: Build and sign IPA
+      if: github.ref == 'refs/heads/main'
+      env:
+        EXPORT_OPTIONS_PLIST: ${{ secrets.EXPORT_OPTIONS_PLIST }}
+      run: |
+        echo "$EXPORT_OPTIONS_PLIST" > ios/ExportOptions.plist
+        
+        xcodebuild -workspace ios/Runner.xcworkspace \
+          -scheme Runner \
+          -sdk iphoneos \
+          -configuration Release \
+          archive -archivePath build/Runner.xcarchive \
+          -allowProvisioningUpdates
+          
+        xcodebuild -exportArchive \
+          -archivePath build/Runner.xcarchive \
+          -exportOptionsPlist ios/ExportOptions.plist \
+          -exportPath build/
+          
+    - name: Upload to TestFlight
+      if: github.ref == 'refs/heads/main'
+      env:
+        ALTOOL_USERNAME: ${{ secrets.ALTOOL_USERNAME }}
+        ALTOOL_PASSWORD: ${{ secrets.ALTOOL_PASSWORD }}
+      run: |
+        xcrun altool --upload-app \
+          --type ios \
+          --file build/Youth\ Club.ipa \
+          --username "$ALTOOL_USERNAME" \
+          --password "$ALTOOL_PASSWORD"
+          
+    - name: Upload build artifacts
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: ios-build-artifacts
+        path: |
+          build/
+          ios/build/
+          
+    - name: Notify Slack on success
+      if: success() && github.ref == 'refs/heads/main'
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"✅ iOS build successful! TestFlight upload completed."}' \
+          $SLACK_WEBHOOK_URL
+          
+    - name: Notify Slack on failure
+      if: failure()
+      env:
+        SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+      run: |
+        curl -X POST -H 'Content-type: application/json' \
+          --data '{"text":"❌ iOS build failed! Check GitHub Actions for details."}' \
+          $SLACK_WEBHOOK_URL

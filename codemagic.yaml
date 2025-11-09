@@ -1,0 +1,179 @@
+definitions:
+  env_vars: &env_vars
+    FLUTTER_VERSION: "3.16.5"
+    XCODE_WORKSPACE: "ios/Runner.xcworkspace"
+    XCODE_SCHEME: "Runner"
+    BUNDLE_ID: "com.youthclub.app"
+    
+workflows:
+  ios-workflow:
+    name: iOS Workflow
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      <<: *env_vars
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.youthclub.app
+      vars:
+        APP_STORE_CONNECT_ISSUER_ID: $APP_STORE_CONNECT_ISSUER_ID
+        APP_STORE_CONNECT_KEY_IDENTIFIER: $APP_STORE_CONNECT_KEY_IDENTIFIER  
+        APP_STORE_CONNECT_PRIVATE_KEY: $APP_STORE_CONNECT_PRIVATE_KEY
+        CERTIFICATE_PRIVATE_KEY: $CERTIFICATE_PRIVATE_KEY
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      
+    triggering:
+      events:
+        - push
+        - tag
+      branch_patterns:
+        - pattern: main
+          include: true
+        - pattern: develop
+          include: true
+      cancel_previous_builds: true
+      
+    scripts:
+      - name: Set up debug keystore
+        script: |
+          set -ex
+          keytool -genkeypair \
+            -alias androiddebugkey \
+            -keypass android \
+            -keystore ~/.android/debug.keystore \
+            -storepass android \
+            -dname 'CN=Android Debug,O=Android,C=US' \
+            -keyalg 'RSA' \
+            -keysize 2048 \
+            -validity 10000
+            
+      - name: Set up provisioning profiles
+        script: |
+          PROFILES_HOME="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES_HOME"
+          PROFILE_PATH="$(mktemp "$PROFILES_HOME"/$(uuidgen).mobileprovision)"
+          echo ${CM_PROVISIONING_PROFILE} | base64 --decode > "$PROFILE_PATH"
+          echo "Saved provisioning profile $PROFILE_PATH"
+          
+      - name: Get Flutter packages
+        script: |
+          flutter packages pub get
+          
+      - name: Install CocoaPods dependencies
+        script: |
+          cd ios && pod install
+          
+      - name: Flutter analyze
+        script: |
+          flutter analyze
+          
+      - name: Flutter unit tests
+        script: |
+          flutter test
+          
+      - name: Build Flutter (iOS)
+        script: |
+          flutter build ios --release --no-codesign
+          
+      - name: Build ipa for distribution
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+            
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      - flutter_drive.log
+      
+    publishing:
+      email:
+        recipients:
+          - developer@youthclub.com
+        notify:
+          success: true
+          failure: true
+          
+      app_store_connect:
+        auth: integration
+        # Submit to TestFlight without releasing to App Store
+        submit_to_testflight: true
+        # Do not submit for App Store review
+        submit_to_app_store: false
+        
+      slack:
+        channel: '#dev-notifications'
+        notify_on_build_start: false
+        notify:
+          success: true
+          failure: true
+          
+  # Separate workflow for App Store releases
+  ios-release:
+    name: iOS App Store Release
+    instance_type: mac_mini_m1
+    max_build_duration: 60
+    environment:
+      <<: *env_vars
+      ios_signing:
+        distribution_type: app_store
+        bundle_identifier: com.youthclub.app
+      vars:
+        APP_STORE_CONNECT_ISSUER_ID: $APP_STORE_CONNECT_ISSUER_ID
+        APP_STORE_CONNECT_KEY_IDENTIFIER: $APP_STORE_CONNECT_KEY_IDENTIFIER  
+        APP_STORE_CONNECT_PRIVATE_KEY: $APP_STORE_CONNECT_PRIVATE_KEY
+        CERTIFICATE_PRIVATE_KEY: $CERTIFICATE_PRIVATE_KEY
+      flutter: stable
+      xcode: latest
+      cocoapods: default
+      
+    triggering:
+      events:
+        - tag
+      tag_patterns:
+        - pattern: v*.*.*
+          include: true
+      cancel_previous_builds: false
+      
+    scripts:
+      - name: Get Flutter packages
+        script: flutter packages pub get
+      - name: Install CocoaPods dependencies  
+        script: cd ios && pod install
+      - name: Flutter analyze
+        script: flutter analyze
+      - name: Flutter unit tests
+        script: flutter test
+      - name: Build Flutter (iOS)
+        script: flutter build ios --release --no-codesign
+      - name: Build ipa for distribution
+        script: |
+          xcode-project build-ipa \
+            --workspace "$XCODE_WORKSPACE" \
+            --scheme "$XCODE_SCHEME"
+            
+    artifacts:
+      - build/ios/ipa/*.ipa
+      - /tmp/xcodebuild_logs/*.log
+      
+    publishing:
+      email:
+        recipients:
+          - developer@youthclub.com
+          - product@youthclub.com
+        notify:
+          success: true
+          failure: true
+          
+      app_store_connect:
+        auth: integration
+        submit_to_testflight: true
+        submit_to_app_store: true
+        
+      slack:
+        channel: '#releases'
+        notify:
+          success: true
+          failure: true
